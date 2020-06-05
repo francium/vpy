@@ -128,8 +128,12 @@ function _cmd_install {
 
 
 function _cmd_run {
-    script=$1
-    args=${@:2}
+    if [[ -z "${1:-}" ]]; then
+        local script="run"
+    else
+        local script=$1
+        local args=${@:2}
+    fi
 
     _activate_venv
     if (( $? != 0 )); then
