@@ -1,21 +1,38 @@
 #!/bin/bash
 
+# Strict mode - http://redsymbol.net/articles/unofficial-bash-strict-mode/
+set -euo pipefail
+IFS=$'\n\t'
+
 
 DEFAULT_VENV_PATH="venv"
-PROJECT_FILE="requirements.txt"
+PROJECT_ROOT=""
+PROJECT_FILE="vpy.json"
 ACTIVATE_PATH="bin/activate"
+CACHE_DIR="cache"
+
+
+function echoerr {
+    echo "$@" 1>&2;
+}
 
 
 function _validate_requirements {
     which python3 > /dev/null
     if (( $? != 0 )); then
-        echo "Python3 not found in PATH"
+        echoerr "Python3 not found in PATH"
         exit 1
     fi
 
     which virtualenv3 > /dev/null
     if (( $? != 0 )); then
-        echo "Virtualenv3 not found in PATH"
+        echoerr "Virtualenv3 not found in PATH"
+        exit 1
+    fi
+
+    which jq > /dev/null
+    if (( $? != 0 )); then
+        echoerr "jq not found in PATH"
         exit 1
     fi
 }
@@ -23,13 +40,21 @@ _validate_requirements
 
 
 function _find_project_root {
+    if [[ $PROJECT_ROOT != "" ]]; then return; fi
+
     pushd . > /dev/null
     while true; do
+        # TODO: Handle filesystem boundary
+        if [[ $PWD == "/" ]]; then
+            echoerr "No vpy project found"
+            exit 1
+        fi
+
         if [[ -f $PROJECT_FILE ]]; then
-            local dir=$(pwd)
+            local dir=$PWD
             popd > /dev/null
 
-            echo $dir
+            PROJECT_ROOT=$dir
             return
         fi
         cd ..
@@ -38,52 +63,114 @@ function _find_project_root {
 
 
 function _create_venv {
-    local VENV_PATH=$1
+    local venv_path=$1
 
-    echo "Creating virtual environment $VENV_PATH"
+    echoerr "Creating virtual environment $venv_path"
     virtualenv $DEFAULT_VENV_PATH
 }
 
 
 function _activate_venv {
-    local PROJECT_ROOT=$(_find_project_root)
-    local FULL_VENV_PATH=$PROJECT_ROOT/$DEFAULT_VENV_PATH
-    if [[ ! -d $FULL_VENV_PATH ]]; then
-        _create_venv $FULL_VENV_PATH
+    _find_project_root
+
+    local full_venv_path=$PROJECT_ROOT/$DEFAULT_VENV_PATH
+    if [[ ! -d $full_venv_path ]]; then
+        _create_venv $full_venv_path
     fi
 
-    . $FULL_VENV_PATH/$ACTIVATE_PATH
+    . $full_venv_path/$ACTIVATE_PATH
+}
+
+
+function _cmd_init {
+    dir_name=${PWD##*/}
+    author=$(git config user.name || echo $USER)
+
+    if [[ -f $PROJECT_FILE ]]; then
+        echoerr "Project file vpy.json already exists"
+        exit 1
+    fi
+
+    cat << EOF > vpy.json
+{
+    "name": "$dir_name",
+    "author": "$author",
+    "scripts": {
+        "run": "python -c \"print('Hello, World!')\""
+    },
+    "requirements": {
+    }
+}
+EOF
+
+    echoerr "Project initialize"
+    cat $PROJECT_FILE
 }
 
 
 function _cmd_install {
     _activate_venv
-    pip install -r $PROJECT_FILE
+    if (( $? != 0 )); then
+        exit 1
+    fi
+
+    local dir=$PROJECT_ROOT/$DEFAULT_VENV_PATH/$CACHE_DIR
+    mkdir -p $dir
+
+    jq \
+        -r \
+        '.requirements | to_entries | map("\(.key) == \(.value)") | join("\n")' \
+        $PROJECT_ROOT/$PROJECT_FILE \
+    > $dir/requirements.txt
+
+    pip install -r $dir/requirements.txt
 }
 
 
 function _cmd_run {
+    script=$1
+    args=${@:2}
+
     _activate_venv
-    echo "TODO: run"
+    if (( $? != 0 )); then
+        exit 1
+    fi
+
+    target=$( \
+        jq \
+            -r \
+            ".scripts | to_entries | map(select(.key | match(\"$script\"))) | .[0].value" \
+            $PROJECT_ROOT/$PROJECT_FILE \
+    )
+    if [[ $target == "null" ]]; then
+        echoerr "Script '$script' not found"
+    fi
+
+    eval "$target $args"
 }
 
 
 function _cmd_shell {
     _activate_venv
-    echo "Entering virtualenv shell"
+    if (( $? != 0 )); then
+        exit 1
+    fi
+
+    echoerr "Entering virtualenv shell"
     bash
-    echo "Exiting virtualenv shell"
+    echoerr "Exiting virtualenv shell"
 }
 
 
 function _cmd_help {
-    echo "\
+    echoerr "\
 vpy - virtualenv wrapper
 
 Usage:
     vpy [command]
 
 Commands:
+    init     TODO
     install  Install requirements.txt
     run      Run project target
     shell    enter virtual environment shell
@@ -96,6 +183,7 @@ function _main {
     args=${@:2}
 
     case $1 in
+        "init")    _cmd_init $args;;
         "install") _cmd_install $args;;
         "run")     _cmd_run $args;;
         "shell")   _cmd_shell $args;;
